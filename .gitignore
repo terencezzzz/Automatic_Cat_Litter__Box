@@ -1,0 +1,20 @@
+# Local tools and generated files
+/.arduino-local/
+/Ultralytics/
+/outputs/
+.venv/
+.ultralytics/
+__pycache__/
+*.py[cod]
+
+# Local data, coursework, and backups
+/data/raw/
+/submission/
+/backups/
+
+# Credentials and model binaries supplied separately
+secrets.h
+.env
+.env.*
+!.env.example
+/models/*.pt
