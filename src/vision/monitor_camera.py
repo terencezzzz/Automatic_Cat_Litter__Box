@@ -8,6 +8,7 @@ from detect import ROOT, YOLO, cv2, predict_waste, read_photo
 from detect_cat import predict_cat
 
 INTERVAL = 2.0
+MIN_VISIT_TIME = 6.0
 CLEAR_TIME = 10.0
 MAX_FRAME_GAP = 4.0
 
@@ -15,6 +16,8 @@ MAX_FRAME_GAP = 4.0
 class Visit:
     def __init__(self):
         self.seen_cat = False
+        self.present_since = None
+        self.last_present = None
         self.clear_since = None
         self.last_clear = None
         self.first_seen_at = None
@@ -31,7 +34,15 @@ class Visit:
 
     def observe(self, cat_present, captured_at):
         if cat_present is True:
-            self.seen_cat = True
+            if self.last_present is None or captured_at - self.last_present > MAX_FRAME_GAP:
+                self.present_since = captured_at
+                if not self.seen_cat:
+                    self.first_seen_at = None
+            self.last_present = captured_at
+            if captured_at - self.present_since >= MIN_VISIT_TIME:
+                self.seen_cat = True
+        else:
+            self.present_since = self.last_present = None
         if cat_present is not False:
             self.clear_since = self.last_clear = None
             return False
@@ -115,7 +126,9 @@ def main():
             ready = visit.observe(cat_present, captured_at)
             if cat_present:
                 visit.record_cat(photo, photo_time, cat_count)
-                print("CAT DETECTED | Clear timer reset", flush=True)
+                presence = captured_at - visit.present_since
+                status = "Visit confirmed" if visit.seen_cat else f"Waiting for {MIN_VISIT_TIME:g}s"
+                print(f"CAT DETECTED | Present: {presence:.1f}s | {status}", flush=True)
             elif not visit.seen_cat:
                 print("Waiting for a cat visit", flush=True)
             elif ready and confirm_next_frame:
