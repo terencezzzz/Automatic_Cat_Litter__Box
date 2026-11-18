@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "esp_camera.h"
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <WiFiMulti.h>
 #include <Preferences.h>
 #include "src/WiFiManager/WiFiManager.h"
@@ -73,18 +74,15 @@ void rememberNetwork(const String &ssid, const String &password) {
     saved &= preferences.getString(("p" + String(i)).c_str(), "") == savedNetworks[i].password;
   }
   preferences.end();
-  Serial.println(saved ? "WiFi network saved for future visits." : "WiFi storage failed. Configure again after restart.");
+  if (!saved) {
+    Serial.println("[WiFi] Could not save the network.");
+  }
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.setDebugOutput(true);
+  Serial.setDebugOutput(false);
   Serial.println();
-  Serial.println("[BOOT] CameraWebServer WiFi-first v3");
-  Serial.printf("[BOOT] Build: %s %s; PSRAM: %s; free heap: %u\n",
-                __DATE__, __TIME__, psramFound() ? "available" : "unavailable", ESP.getFreeHeap());
-  Serial.printf("[CAMERA] PWDN=%d RESET=%d XCLK=%d SDA=%d SCL=%d\n",
-                PWDN_GPIO_NUM, RESET_GPIO_NUM, XCLK_GPIO_NUM, SIOD_GPIO_NUM, SIOC_GPIO_NUM);
 
   // Keep the camera powered down while starting/configuring Wi-Fi. The
   // camera driver releases PWDN during esp_camera_init() below.
@@ -97,7 +95,7 @@ void setup() {
   digitalWrite(LED_GPIO_NUM, LOW);
 #endif
   delay(100);
-  Serial.println("[WIFI] Starting before camera initialization...");
+  Serial.println("[WiFi] Starting...");
   Serial.flush();
   if (!WiFi.mode(WIFI_STA)) {
     Serial.println("[STOP] WiFi driver could not start. No automatic restart requested.");
@@ -211,16 +209,13 @@ void setup() {
 #endif
 
   // camera init
-  Serial.println("[CAMERA] Initializing sensor after WiFi connection...");
   Serial.flush();
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("[CAMERA] Init failed: 0x%x (%s)\n", err, esp_err_to_name(err));
-    Serial.println("[STOP] WiFi is connected, but camera initialization failed. Camera webpage is unavailable.");
     Serial.flush();
     return;
   }
-  Serial.println("[CAMERA] Sensor initialized successfully.");
 
   sensor_t *s = esp_camera_sensor_get();
   if (s == nullptr) {
@@ -261,6 +256,11 @@ void setup() {
     Serial.print("Camera Ready! Use 'http://");
     Serial.print(WiFi.localIP());
     Serial.println("' to connect");
+    if (MDNS.begin("pawlog-cam")) {
+      Serial.println("[mDNS] http://pawlog-cam.local");
+    } else {
+      Serial.println("[mDNS] Unavailable. Use the IP above.");
+    }
   } else {
     Serial.println("[SERVER] Startup failed. Camera webpage is not ready; check the preceding error.");
   }

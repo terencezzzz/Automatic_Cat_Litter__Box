@@ -2,7 +2,10 @@
 import argparse
 import json
 from datetime import datetime
+from threading import Thread
 from time import monotonic, sleep
+
+from upload_pawlog import KEY as PAWLOG_KEY, sync_visits
 
 from detect import ROOT, YOLO, cv2, predict_waste, read_photo
 from detect_cat import predict_cat
@@ -97,8 +100,19 @@ def save_waste_check(model, photo, photo_time, visit):
         waste_photo="waste-original.png",
         waste_photo_at=photo_time.isoformat(),
     )
-    (output / "result.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    pending_report = output / "result.json.tmp"
+    pending_report.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    pending_report.replace(output / "result.json")
     print(f"Waste detected: {report['waste_detected']} | Saved: {output}", flush=True)
+
+
+def sync_pawlog_in_background():
+    while True:
+        try:
+            sync_visits()
+        except (OSError, ValueError) as error:
+            print(f"PawLog sync unavailable: {type(error).__name__}", flush=True)
+        sleep(15)
 
 
 def main():
@@ -114,6 +128,8 @@ def main():
     print(f"Loading models. Camera: {source}", flush=True)
     cat_model = YOLO(str(ROOT / "models" / "yolo26n.pt"))
     waste_model = YOLO(str(ROOT / "models" / "weights.pt"))
+    if PAWLOG_KEY.is_file():
+        Thread(target=sync_pawlog_in_background, daemon=True).start()
     visit = Visit()
     confirm_next_frame = False
     print("Monitoring. Press Ctrl+C to stop.", flush=True)

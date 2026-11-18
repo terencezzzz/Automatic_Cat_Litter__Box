@@ -1,25 +1,35 @@
-# Automatic Cat Litter Box
+# Automatic Cat Litter Box / PawLog
 
-Workshop II prototype. For the presentation, the ESP32-CAM provides snapshots over the local network. A Windows PC runs cat and waste detection. The hardware teammate owns the Arduino, sensors, motor control, and prototype integration.
+ESP32-CAM supplies live video and photos over Wi-Fi. A Windows PC detects cat visits and waste, obtains Groq observations and automatically uploads records to https://pawlog-workshop-demo.shangkeytchong.chatgpt.site/#history.
 
-## Repository layout
+## Start monitoring
 
-| Folder | Contents |
-| --- | --- |
-| [src/vision/](src/vision/) | Windows detection scripts and launchers |
-| [src/firmware/camera/](src/firmware/camera/) | ESP32-CAM firmware and [Wi-Fi setup](src/firmware/camera/CameraWebServer/WIFI_SETUP.md) |
-| [src/firmware/diagnostics/](src/firmware/diagnostics/) | Arduino sensor, safety-gate, and ESP32 Wi-Fi diagnostic sketches |
-| `data/raw/` | Original local sample photos |
-| [models/](models/README.md) | Local YOLO weights and setup notes |
+1. Install dependencies from requirements.txt in .venv and supply both weights as described in models/README.md.
+2. Copy .env.example to .env and configure Groq locally.
+3. Connect the camera and PC to the same network. Verify http://pawlog-cam.local/capture.
+4. Double-click src/vision/start-camera-monitor.cmd and press Enter for the default camera name.
 
-Python dependencies are listed in `requirements.txt` at the project root.
+The PC must stay running. Six seconds of continuous cat detection confirms a visit. Ten seconds without detection plus a fresh-frame check triggers waste detection. Photos and JSON are saved under outputs/vision/auto-*/. Pending uploads retry every 15 seconds; failed AI analysis retries after five minutes.
 
-## Presentation setup
+## PawLog and credentials
 
-1. Install Python 3.10 on the demo PC and follow the [AI setup guide](src/vision/README.md). Copy the two model files into [models/](models/README.md) before the presentation.
-2. Connect the PC and ESP32-CAM to the same reachable network. Check that `http://<camera-ip>/capture` opens a snapshot.
-3. Run `src/vision/start-camera-monitor.cmd` and enter the ESP32-CAM IP. The monitor watches for a cat visit and runs waste detection after a confirmed cat-free interval. Event images and JSON go to `outputs/vision/`.
+Hosted History, photographs and AI observations are public by owner choice. Camera live video requires the viewer to reach the camera locally. Online History can be viewed remotely after upload.
 
-The PC reports vision results. Arduino-side independent sensors must govern motor safety. Unknown vision results must prevent cleaning. Hardware integration and the full presentation flow still need a test with the assembled prototype.
+The configured PC stores the upload credential in ignored outputs/vision/.pawlog-upload-key. Transfer this privately to a fresh PC. Hosted PAWLOG_UPLOAD_KEY must match. Groq credentials are read locally from .env. Runtime photos, credentials and model binaries must stay excluded from Git.
 
-Local build output, camera results, source images, coursework files, backups, and model binaries are kept outside the Git upload through `.gitignore`.
+AI describes stool appearance and possible abnormalities with care guidance. AI can make mistakes. Consult a licensed veterinarian about concerns. A photo cannot establish overall cat health.
+
+## Firmware
+
+CameraWebServer uses 115200 baud and advertises pawlog-cam.local. See src/firmware/camera/CameraWebServer/WIFI_SETUP.md for upload settings and src/firmware/WIRING_GUIDE.md for UNO and IBT-2 connections.
+
+The chosen motor configuration omits limit switches. MotorTest.ino currently supports a manual one-second pulse and stop command. Automatic tray motion, accurate return-to-home and occupied-tray protection remain unimplemented or unverified. HC-SR04 is optional for separate diagnostics; camera monitoring does not require it.
+
+## Source layout
+
+- src/vision contains detection, monitoring and upload scripts.
+- src/webapp contains the local viewer, Groq client and earlier backend drafts.
+- deploy/pawlog contains the hosted Worker, frontend and Sites manifest. Run node build.mjs there to create dist/server/index.js. Hosting uses the BUCKET R2 binding.
+- src/firmware contains ESP32-CAM firmware and UNO diagnostic sketches.
+
+Double-click preview-webapp.cmd for an optional local History viewer. The published website receives records directly from the configured monitoring PC.

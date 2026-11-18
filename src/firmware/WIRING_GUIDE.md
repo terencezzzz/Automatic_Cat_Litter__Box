@@ -2,7 +2,11 @@
 
 This wiring supports both `MotorTest.ino` and `SensorMotorTest.ino` on the Arduino Uno. Keep the motor power switch off while wiring or uploading a sketch.
 
-## Arduino Uno and HC-SR04
+## Current integration
+
+Camera monitoring and hosted History run independently of UNO. The motor configuration omits limit switches and uses MotorTest manual timed pulses. Automatic tray motion and occupied-tray protection are unverified.
+
+## Arduino Uno and HC-SR04 (optional diagnostic)
 
 | From | Connect to |
 | --- | --- |
