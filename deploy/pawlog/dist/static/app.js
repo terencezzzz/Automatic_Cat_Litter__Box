@@ -11,6 +11,7 @@ const arrowLink = (label, href) => `<a class="text-link" href="${href}">${escape
 const names = {overview:'Overview',camera:'Camera',history:'History',detail:'Observation',cleaning:'Cleaning',cats:'My Cats',notifications:'Notifications',settings:'Settings'};
 const defaultCameraIp = 'pawlog-cam.local';
 const cameraIpStorageKey = 'pawlog.cameraIp';
+const streamStorageKey = 'pawlog.streamOverride';
 function loadCameraIp() {
   try {
     const saved = localStorage.getItem(cameraIpStorageKey);
@@ -18,26 +19,27 @@ function loadCameraIp() {
   } catch {}
   return defaultCameraIp;
 }
-function saveCameraIp(value) {
+function saveCameraIp(value, streamOverride) {
   try {
     localStorage.setItem(cameraIpStorageKey, value);
+    if (streamOverride !== undefined) localStorage.setItem(streamStorageKey, streamOverride);
     return true;
   } catch {
     return false;
   }
 }
-const defaultSettings = () => ({cameraIp:defaultCameraIp,streamOverride:'',port:'COM3',model:'Visual model (not connected)',monitor:false,cloud:false,notifications:true});
+function loadStreamOverride() {
+  try { return localStorage.getItem(streamStorageKey) || ''; } catch { return ''; }
+}
+const defaultSettings = () => ({cameraIp:defaultCameraIp,streamOverride:''});
 const historyCategories = [
-  {name:'Box visit', icon:'paw'}, {name:'Manual photo', icon:'camera'},
-];
-const boxStatuses = [
-  {name:'In use', tone:'blue'}, {name:'Needs cleaning', tone:'amber'}, {name:'Available', tone:'green'},
+  {name:'Box visit', icon:'paw'},
 ];
 const defaultFilters = () => ({date:'', cat:'', category:'', query:''});
 const state = {
   cats: [
-    {id:'mochi',name:'Mochi',age:2,breed:'Brown & white tabby',photo:asset('mochi.jpg')},
-    {id:'luna',name:'Luna',age:3,breed:'British Shorthair',photo:asset('luna.jpg')},
+    {id:'mochi',name:'Mochi',age:2,breed:'Brown & white tabby',sample:true,photo:asset('mochi.jpg')},
+    {id:'luna',name:'Luna',age:3,breed:'British Shorthair',sample:true,photo:asset('luna.jpg')},
   ],
   events: [
     {id:'sample-1',time:'10:42 AM',date:'2026-11-08',kind:'Manual photo',catId:'',status:'Review image'},
@@ -47,10 +49,74 @@ const state = {
     {id:'sample-5',time:'5:03 PM',date:'2026-11-07',kind:'Box visit',catId:'mochi',status:'Review image'},
   ],
   filters:defaultFilters(), sortAscending:false, selectedRecordId:'',
-  boxes:[{id:1, status:0}], cameraStream:null, cameraError:'',
+  cameraStream:null, cameraError:'',
   analysisTimer:null, simTimer:null, simStage:'idle', commands:[],
-  read:false, notificationFilter:'all', settings:{...defaultSettings(),cameraIp:loadCameraIp()},
+  settings:{...defaultSettings(),cameraIp:loadCameraIp(),streamOverride:loadStreamOverride()},
 };
+const identityKey = 'pawlog-cat-identities-v1';
+let assignments = {};
+try {
+  const saved = JSON.parse(localStorage.getItem(identityKey) || 'null');
+  if (Array.isArray(saved?.cats) && saved.assignments) {
+    state.cats = saved.cats;
+    assignments = saved.assignments;
+  }
+} catch {}
+
+function saveIdentity(cats, nextAssignments) {
+  localStorage.setItem(identityKey, JSON.stringify({cats, assignments:nextAssignments}));
+  state.cats = cats;
+  assignments = nextAssignments;
+}
+
+let device = {};
+let motorRequestPending = false;
+const localDashboard = location.protocol === 'http:' && location.hostname === '127.0.0.1';
+
+function updateDevice() {
+  const panel = $('#usb-motor-panel');
+  if (panel) {
+    panel.hidden = !device.motor;
+    $('#usb-hint').hidden = !!device.motor;
+    const status = [device.motor,device.result].filter(Boolean).join(' · ');
+    if ($('#usb-status').textContent !== status) $('#usb-status').textContent = status;
+    $('[data-action="usb-run"]').disabled = !device.canRun || motorRequestPending;
+  }
+  const banner = $('#device-banner');
+  if (banner) banner.textContent = device.motor ? 'USB · ' + device.motor : localDashboard ? 'Local PawLog' : 'PawLog history';
+  if ($('#overview-motor')) $('#overview-motor').textContent = device.motor || 'Local USB required';
+  if ($('#overview-cat')) $('#overview-cat').textContent = device.catPresent === true ? 'Cat detected' : device.catPresent === false ? 'No cat detected' : 'Unknown';
+}
+
+async function refreshDevice() {
+  if (!localDashboard) return;
+  try {
+    const response = await fetch('/api/local/device',{cache:'no-store',signal:AbortSignal.timeout(1200)});
+    device = response.ok ? await response.json() : {};
+  } catch {
+    device = {};
+  }
+  updateDevice();
+}
+
+async function requestMotor(action) {
+  const run = action === 'run';
+  if (run && (!device.canRun || motorRequestPending || !confirm('Run one cleaning cycle? Keep the tray in view.'))) return;
+  if (run) motorRequestPending = true;
+  updateDevice();
+  try {
+    const response = await fetch('/api/local/' + action,{method:'POST',signal:AbortSignal.timeout(3000)});
+    const result = await response.json();
+    toast(result.message || result.error);
+  } catch {
+    toast('USB request could not be confirmed. Check the device.');
+  } finally {
+    await refreshDevice();
+    if (run) motorRequestPending = false;
+    updateDevice();
+  }
+}
+
 const catById = id => state.cats.find(cat => cat.id === id);
 const catName = id => catById(id)?.name || 'Unassigned';
 const catOptions = (selected = '', all = false) => `${all ? '<option value="">All cats</option><option value="unassigned">Unassigned</option>' : '<option value="">Unassigned</option>'}${state.cats.map(cat=>`<option value="${escapeHtml(cat.id)}" ${selected===cat.id?'selected':''}>${escapeHtml(cat.name)}</option>`).join('')}`;
@@ -67,23 +133,24 @@ function toast(message) {
   toast.timer = setTimeout(() => { element.hidden = true; }, 5000);
 }
 function overview() {
-  const visits = state.events.filter(event => event.kind === 'Box visit' && event.date==='2026-11-08');
+  const visits = visionVisits.slice(0,5);
+  const latest = visits[0];
   return `${heading('Overview', '', viewPhotosButton())}
   <div class="dashboard-grid">
     <div class="stack">
       <article class="panel snapshot-panel">
-        <div class="panel-heading"><h2>Latest sample photo</h2>${arrowLink('Open camera','#camera')}</div>
-        ${snapshot()}
-        <div class="snapshot-meta"><span>${icon('clock')}Nov 8 · 10:42 AM</span><span>Manual photo</span></div>
-        <div class="snapshot-result"><p>No stool visible in this sample.</p>${arrowLink('View observation','#detail/sample-1')}</div>
+        <div class="panel-heading"><h2>Latest visit</h2>${arrowLink('Open camera','#camera')}</div>
+        ${latest ? `<div class="snapshot"><img src="${visitImage(latest,'cat.jpg')}" alt="Cat during the latest visit"></div>
+        <div class="snapshot-meta"><span>${latest.date} · ${latest.time}</span><span>${escapeHtml(catName(latest.catId))}</span></div>
+        <div class="snapshot-result">${latest.status ? `<p>${latest.status}</p>` : ''}${arrowLink('Open full record','#detail/' + latest.id)}</div>` : '<p class="fine">Waiting for a camera visit.</p>'}
       </article>
-      <article class="panel"><div class="panel-heading"><h2>Recent visits</h2>${arrowLink('History','#history')}</div>${visits.map(event=>`<a class="visit-row" href="#detail/${event.id}">${catAvatar(catById(event.catId))}<div><strong>${escapeHtml(catName(event.catId))}</strong><small>Box visit · Sample</small></div><time>${event.time}</time>${icon('chevron')}</a>`).join('')}</article>
+      <article class="panel"><div class="panel-heading"><h2>Recent visits</h2>${arrowLink('History','#history')}</div>${visits.map(event=>`<a class="visit-row" href="#detail/${event.id}">${catAvatar(catById(event.catId))}<div><strong>${escapeHtml(catName(event.catId))}</strong>${event.status ? `<small>${event.status}</small>` : ''}</div><time>${event.date} · ${event.time}</time>${icon('chevron')}</a>`).join('')}</article>
     </div>
     <div class="dashboard-side">
-      <article class="panel status-panel"><div class="panel-heading"><h2>Device status</h2></div><dl class="status-list"><div class="status-row">${icon('camera')}<dt>Camera</dt><dd>${state.cameraError ? pill('Connection failed','amber') : pill('Open Camera to view')}</dd></div><div class="status-row">${icon('cat')}<dt>Cat presence</dt><dd>${pill('Unknown','amber')}</dd></div><div class="status-row">${icon('clean')}<dt>Motor</dt><dd>${pill('Locked','amber','lock')}</dd></div></dl>${arrowLink('Check device connection','#settings')}</article>
-      <article class="panel"><div class="panel-heading"><h2>My Cats</h2>${arrowLink('View cats','#cats')}</div><div class="cat-chips">${state.cats.slice(0,2).map(cat=>`<a class="cat-chip" href="#cats">${catAvatar(cat)}<span><strong>${escapeHtml(cat.name)}</strong><small>${escapeHtml(cat.age)} years old</small></span></a>`).join('')}</div></article>
+      <article class="panel status-panel"><div class="panel-heading"><h2>Device status</h2></div><dl class="status-list"><div class="status-row">${icon('camera')}<dt>Camera</dt><dd>${state.cameraError ? pill('Connection failed','amber') : pill('Open Camera to view')}</dd></div><div class="status-row">${icon('cat')}<dt>Cat presence</dt><dd><span id="overview-cat" class="pill">Unknown</span></dd></div><div class="status-row">${icon('clean')}<dt>Motor</dt><dd><span id="overview-motor" class="pill">Local USB required</span></dd></div></dl>${arrowLink('Check device connection','#settings')}</article>
+      <article class="panel"><div class="panel-heading"><h2>My Cats</h2>${arrowLink('View cats','#cats')}</div><div class="cat-chips">${state.cats.slice(0,2).map(cat=>`<a class="cat-chip" href="#cats">${catAvatar(cat)}<span><strong>${escapeHtml(cat.name)}</strong><small>${cat.age === '' ? 'Age not set' : escapeHtml(cat.age) + ' years old'}</small></span></a>`).join('')}</div></article>
     </div>
-  </div><div id="box-overview">${boxOverview()}</div>`;
+  </div>`;
 }
 function camera() {
   const urls = cameraEndpoints(state.settings);
@@ -164,19 +231,20 @@ async function refreshVisionVisits() {
     visionVisits = records.map(record => {
       const captured = new Date(record.capturedAt);
       return {
-        id:record.id, real:true, catId:'', kind:'Box visit',
+        id:record.id, real:true, catId:assignments[record.id] || '', kind:'Box visit',
         date:captured.toLocaleDateString('sv-SE',{timeZone:'Asia/Kuala_Lumpur'}),
         time:captured.toLocaleTimeString('en-US',{timeZone:'Asia/Kuala_Lumpur',hour:'numeric',minute:'2-digit'}),
         timestamp:captured.getTime(),
         observation:record.observation, analysisStatus:record.analysisStatus, wasteDetected:record.wasteDetected,
-        status:record.wasteDetected?'Waste detected':'No waste detected',
+        status:record.wasteDetected?'Waste detected':'',
       };
     });
     visitStatus = visionVisits.length ? '' : 'Waiting for the first completed camera visit.';
     if (currentRoute().page === 'history') {
       $('#vision-status').textContent = visitStatus;
       if (previous !== JSON.stringify(visionVisits)) refreshHistory();
-    } else if (currentRoute().page === 'detail' && previous !== JSON.stringify(visionVisits)) {
+    } else if (['detail','overview','cats','notifications'].includes(currentRoute().page) &&
+        previous !== JSON.stringify(visionVisits) && !document.activeElement?.closest('#visit-assignment')) {
       render();
     }
   } catch {
@@ -226,7 +294,7 @@ function historyResults() {
         return `<tr class="${active ? 'selected-record' : ''}" data-history-row="${event.id}">
           <td><button class="record-time history-record" type="button" data-action="history-record" data-id="${event.id}" aria-pressed="${active}"><img src="${visitImage(event,'cat.jpg')}" alt="" width="65" height="46"><span><strong>${event.time}</strong><small>${event.date}</small></span></button></td>
           <td>${escapeHtml(catName(event.catId))}</td><td class="type-column">${event.kind}</td>
-          <td>${pill(event.status, event.status === 'Failed' ? 'red' : event.status === 'Pending' ? 'neutral' : 'amber')}</td>
+          <td>${event.status ? pill(event.status, 'amber') : ''}</td>
         </tr>`;
       }).join('')}</tbody></table>` : empty('No records found', visionVisits.length ? 'Try another search or filter.' : 'Completed camera visits will appear here automatically.')}
     </section>
@@ -243,7 +311,7 @@ function historyRecordDetails(event) {
     <dl class="status-list">
       <div class="status-row"><dt>Captured</dt><dd>${event.date} · ${event.time}</dd></div>
       <div class="status-row"><dt>Event</dt><dd>${event.kind}</dd></div>
-      <div class="status-row"><dt>Observation</dt><dd>${event.status}</dd></div>
+      ${event.status ? `<div class="status-row"><dt>Observation</dt><dd>${event.status}</dd></div>` : ''}
     </dl>
     ${arrowLink('Open full record', '#detail/' + event.id)}`;
 }
@@ -261,20 +329,6 @@ function refreshHistory(focusSelector) {
   $('#history-results').innerHTML = historyResults();
   if (focusSelector) $(focusSelector)?.focus({preventScroll:true});
 }
-function boxOverview() {
-  return `<section class="panel spaced" aria-labelledby="box-title">
-    <div class="panel-heading"><h2 id="box-title">Litter box</h2>${pill('Demo')}</div>
-    <dl class="box-counts">
-      <div><dt>Total</dt><dd>${state.boxes.length}</dd></div>
-      ${boxStatuses.map((status, index) => `<div><dt>${status.name}</dt><dd>${state.boxes.filter(box => box.status === index).length}</dd></div>`).join('')}
-    </dl>
-    ${state.boxes.map(box => {
-      const current = boxStatuses[box.status];
-      const next = boxStatuses[(box.status + 1) % boxStatuses.length];
-      return `<button type="button" class="box-row" data-action="cycle-box" data-id="${box.id}" aria-label="Litter box: ${current.name}. Set ${next.name}"><strong>Litter box</strong>${pill(current.name, current.tone)}${icon('arrow')}</button>`;
-    }).join('')}
-  </section>`;
-}
 function visitPhotos(event) {
   if(event.kind!=='Box visit') return `<div class="callout">${icon('cat')}<p>Cat photos are saved for box visits. ${arrowLink('Explore a sample visit','#detail/sample-2')}</p></div>`;
   // One sample portrait is reused with different presentation styles, not real captured frames.
@@ -286,20 +340,32 @@ function visitPhotos(event) {
 }
 function stoolGuidance(observation) {
   const {appearance, finding, blood} = observation;
-  if (!appearance) return '';
-  const label = {typical:"Your cat’s stool looks healthy in this photo.",atypical:'Atypical-looking stool',unclear:'Appearance unclear'}[appearance];
+  const label = {typical:'Looks normal',atypical:'Looks unusual',unclear:'Hard to tell'}[appearance] || 'Hard to tell';
   const possibleBlood = blood === 'possible_red' || blood === 'possible_tarry';
   const details = {
-    loose:'Loose-looking stool can fit with digestive upset. A recent food change is one possible factor. Check appetite, energy and the next bowel movements.',
-    hard:'Hard-looking pellets can go with difficulty passing stool. Check for straining and whether the cat is eating, drinking and urinating normally.',
-    unusual_color:'Lighting and litter can change how color looks. Check a fresh stool in neutral light and compare it with your cat’s usual stool.',
+    loose:'Check how your cat is eating and acting, and look at the next poop.',
+    hard:'Watch for straining and check whether your cat is eating, drinking and peeing as usual.',
+    unusual_color:'Litter and lighting can change how the poop looks. Check the next fresh poop in good light.',
   };
-  let advice = 'Keep an eye on changes from your cat’s usual stool and behavior.';
-  if (appearance === 'unclear') advice = 'Check the next fresh stool in good light. Look at your cat’s appetite and behavior if you are concerned.';
-  if (appearance === 'atypical') advice = (details[finding] || 'Compare with your cat’s usual stool and check appetite and energy.')
-    + ' Contact your veterinarian if the change persists, recurs, or comes with vomiting, poor appetite or low energy.';
-  if (possibleBlood) advice = 'Contact your veterinarian promptly and show them the photo. Seek urgent care if there is heavy bleeding, severe diarrhea, marked lethargy, or repeated vomiting.';
-  return `<p>${pill(label, appearance === 'typical' ? 'green' : 'amber')}</p>
+  let advice = 'Watch for changes in your cat’s poop or behavior.';
+  if (!appearance || appearance === 'unclear') advice = 'Check the next fresh poop in good light.';
+  if (appearance === 'atypical') advice = (details[finding] || 'Compare it with your cat’s usual poop. Check how your cat is eating and acting.')
+    + ' Contact your vet if it keeps happening or your cat vomits, eats less or has less energy.';
+  if (possibleBlood) advice = 'Call your vet soon and show them the photo. Get urgent care if your cat is bleeding heavily, has severe diarrhea, is very weak or keeps vomiting.';
+  const summary = appearance === 'typical' ? 'The poop looks brown and holds its shape.'
+    : appearance === 'atypical' ? ({
+      loose:'The poop looks loose or watery.',
+      hard:'The poop looks like hard pellets.',
+      unusual_color:'The color looks different.',
+    }[finding] || 'Something looks different in this photo.')
+    : 'The photo does not show enough detail for a rating.';
+  const labels = {color:'Color',shape:'Shape',visible_details:'Visible details',limitations:'Image limitations'};
+  return `<div class="callout health-rating spaced ${appearance === 'typical' ? '' : 'amber'}">
+    <p><strong>Health rating · ${label}</strong><br>${escapeHtml(summary)}</p>
+    <dl id="health-rating-details" class="detail-observations" hidden>${Object.entries(labels).map(([field, title])=>
+      `<div><dt>${title}</dt><dd>${escapeHtml(/\b(?:blood|bleeding|bloody|haemorrhage|hemorrhage)\b/i.test(observation[field]) ? 'See the appearance assessment.' : observation[field])}</dd></div>`).join('')}</dl>
+    <button type="button" class="text-link" data-action="toggle-health-details" aria-controls="health-rating-details" aria-expanded="false">Read more</button>
+  </div>
     ${possibleBlood ? `<div class="callout red"><p><strong>Possible blood</strong><br>${blood === 'possible_red'
       ? 'A red area on the stool may be blood.'
       : 'A black, tar-like appearance may indicate digested blood.'} The photo alone cannot confirm it.</p></div>` : ''}
@@ -309,16 +375,22 @@ function stoolGuidance(observation) {
 
 function aiObservation(event) {
   const observation = event.observation;
-  const labels = {color:'Color',shape:'Shape',visible_details:'Visible details',limitations:'Image limitations'};
   if (!event.wasteDetected) return '';
   const message = event.analysisStatus === 'failed'
     ? 'AI could not analyze this photo. PawLog will retry automatically.'
     : 'Waiting for AI photo observation.';
   return `<article class="panel spaced"><h2>AI photo observation</h2>
-    ${observation ? `${stoolGuidance(observation)}<dl class="detail-observations">${Object.entries(labels).map(([field,label])=>
-      `<div><dt>${label}</dt><dd>${escapeHtml(/\b(?:blood|bleeding|bloody|haemorrhage|hemorrhage)\b/i.test(observation[field]) ? 'See the appearance assessment.' : observation[field])}</dd></div>`).join('')}</dl>
-`
+    ${observation ? stoolGuidance(observation)
       : `<p class="fine" role="status">${message}</p>`}</article>`;
+}
+
+function visitAssignment(event) {
+  return `<form id="visit-assignment" data-id="${escapeHtml(event.id)}" class="form-stack spaced">
+    <label>Assign cat<select name="cat">${catOptions(event.catId)}<option value="new">Create new cat…</option></select></label>
+    <label class="new-cat-name" hidden>Cat name<input name="catName" maxlength="60" autocomplete="off"></label>
+    <button class="button" type="submit">Save assignment</button>
+    <p class="fine no-margin">Saved in this browser.</p>
+  </form>`;
 }
 
 function detail(identifier) {
@@ -330,8 +402,8 @@ function detail(identifier) {
       ['Waste detection','detection.jpg'],
     ];
     return `${arrowLink('Back to History','#history')}${heading('Camera visit',`${event.date} · ${event.time} MYT`)}
-      <p>${pill(event.status)}</p><div class="split-layout">${images.map(([label,file])=>`
-        <article class="panel"><h2>${label}</h2><div class="snapshot"><img src="${visitImage(event,file)}" alt="${label}"></div></article>
+      ${event.status ? `<p>${pill(event.status)}</p>` : ''}<div class="split-layout">${images.map(([label,file])=>`
+        <article class="panel"><h2>${label}</h2><div class="snapshot"><img src="${visitImage(event,file)}" alt="${label}"></div>${file === 'cat.jpg' ? visitAssignment(event) : ''}${file === 'detection.jpg' && event.wasteDetected === false ? '<p class="fine spaced no-margin">No poop detected</p>' : ''}</article>
       `).join('')}</div>${aiObservation(event)}
       <p class="detail-disclaimer spaced">AI can make mistakes. If you’re concerned about your cat’s health, consult a licensed veterinarian.</p>`;
   }
@@ -341,17 +413,25 @@ function detail(identifier) {
   return `<a class="back-link" href="#history">${icon('arrow')}Back to History</a>${heading('Photo details','Sample photo observation · Nov '+event.date.slice(-2)+', '+event.time,`<button class="button secondary" data-action="retry" data-id="${event.id}" ${pending?'disabled':''}>${icon('clean')}${pending?'Analysis pending':'Preview analysis again'}</button>`)}<div class="split-layout"><div class="stack">${visitPhotos(event)}<article class="panel"><div class="panel-heading"><h2>Litter box photos</h2>${pill('Demo image')}</div><div class="detail-pictures"><div><h3>Original image</h3>${snapshot()}</div><div><h3>Detection image</h3><div class="detection-placeholder">${icon('camera')}No detection output.<br>Detector not connected.</div></div></div><div class="snapshot-meta"><span>${event.kind} · Sample record</span><span>No inference performed</span></div></article><article class="panel"><div class="panel-heading"><h2>Photo observation</h2>${pill(event.status,failed?'red':'amber')}</div>${pending?`<div class="callout">${icon('clock')}<p>Simulated analysis pending.<br><button class="text-link" data-action="finish-analysis" data-id="${event.id}">Show sample result ${icon('arrow')}</button></p></div>`:failed?`<div class="callout red">${icon('info')}<p>Sample analysis failed. The original photo is above.</p></div>`:`<div class="observation-intro"><span class="observation-icon">${icon('clean')}</span><div><h3>No visible stool in this sample.</h3></div></div><dl class="detail-observations"><div><dt>Observed color</dt><dd>Unable to assess</dd></div><div><dt>Observed shape</dt><dd>Unable to assess</dd></div><div><dt>Visible changes</dt><dd>Unable to assess</dd></div><div><dt>Image limitations</dt><dd>Generated sample image</dd></div></dl><div class="callout spaced">${icon('info')}<p><strong>Care guidance</strong><br>Contact your vet if you are concerned about your cat.</p></div>`}<p class="detail-disclaimer">Photo observations are not a diagnosis.</p></article></div><div class="stack"><article class="panel"><h2>Cat assignment</h2>${event.kind==='Box visit'?`<div class="identity-photo"><img src="${escapeHtml(event.visitPhoto)}" class="identity-frame-${event.coverFrame}" alt="Sample cover to help you identify the visiting cat"></div><p class="fine">${event.manualCover?'Your chosen':'Suggested'} cover · Frame 0${event.coverFrame+1} · Demo</p>`:''}<form id="assign-form" data-id="${event.id}" class="form-stack"><label>Assign to a cat<select name="cat">${catOptions(event.catId)}</select></label><button class="button" type="submit">Save assignment</button></form><p class="fine spaced">Changes reset on reload.</p></article></div></div>`;
 }
 function cats() {
-  return `${heading('My Cats','',`<button class="button" data-action="add-cat">${icon('plus')}Add a cat</button>`)}<div class="cat-grid">${state.cats.map((cat,index)=>`<article class="panel cat-profile"><div class="cat-cover ${index%2?'luna':''}">${icon('paw')}<img class="cat-avatar" src="${escapeHtml(cat.photo)}" alt="${escapeHtml(cat.name)}'s sample portrait" width="83" height="83"></div><div class="cat-profile-body"><div class="cat-title"><h2>${escapeHtml(cat.name)}</h2>${pill('Sample profile')}</div><p>${escapeHtml(cat.breed||'Breed not set')}</p><dl class="cat-facts"><div><dt>Age</dt><dd>${escapeHtml(cat.age)} years old</dd></div><div><dt>Assigned records</dt><dd>${state.events.filter(event=>event.catId===cat.id).length} sample records</dd></div></dl><div class="cat-card-bottom"><button class="text-link" data-action="cat-history" data-id="${escapeHtml(cat.id)}">View history ${icon('arrow')}</button><button class="icon-button" data-action="edit-cat" data-id="${escapeHtml(cat.id)}" aria-label="Edit ${escapeHtml(cat.name)}">${icon('edit')}</button></div></div></article>`).join('')}<button class="panel cat-add" data-action="add-cat">${icon('cat')}<span class="text-link">${icon('plus')}Add a cat</span></button></div>`;
+  return `${heading('My Cats','',`<button class="button" data-action="add-cat">${icon('plus')}Add a cat</button>`)}<div class="cat-grid">${state.cats.map((cat,index)=>`<article class="panel cat-profile"><div class="cat-cover ${index%2?'luna':''}">${icon('paw')}<img class="cat-avatar" src="${escapeHtml(cat.photo || asset('mochi.jpg'))}" alt="${cat.photo ? escapeHtml(cat.name) : ''}" width="83" height="83"></div><div class="cat-profile-body"><div class="cat-title"><h2>${escapeHtml(cat.name)}</h2>${pill(cat.sample ? 'Sample profile' : 'Cat profile')}</div><p>${escapeHtml(cat.breed||'Breed not set')}</p><dl class="cat-facts"><div><dt>Age</dt><dd>${cat.age === '' ? 'Age not set' : escapeHtml(cat.age) + ' years old'}</dd></div><div><dt>Assigned records</dt><dd>${visionVisits.filter(event=>event.catId===cat.id).length}</dd></div></dl><div class="cat-card-bottom"><button class="text-link" data-action="cat-history" data-id="${escapeHtml(cat.id)}">View history ${icon('arrow')}</button><button class="icon-button" data-action="edit-cat" data-id="${escapeHtml(cat.id)}" aria-label="Edit ${escapeHtml(cat.name)}">${icon('edit')}</button></div></div></article>`).join('')}<button class="panel cat-add" data-action="add-cat">${icon('cat')}<span class="text-link">${icon('plus')}Add a cat</span></button></div>`;
 }
 function cleaning() {
   const stages=['Queued','Running','Completed'];
   const active={queued:0,running:1,completed:2}[state.simStage];
   const simText={idle:'Ready to preview. No physical motor movement.',queued:'Sample request queued. Checking simulated conditions…',running:'Sample cycle running. No startup command was sent.',completed:'Sample cycle completed. No real cleaning was performed.',stopped:'Simulation stopped. Real motor state is unknown.',failed:'Sample request rejected: the selected condition is not clear.'}[state.simStage];
-  return `${heading('Cleaning')}<div class="panel cleaning-lock"><span class="lock-symbol">${icon('lock')}</span><div>${pill('Real cleaning locked','amber','lock')}<h2>Hardware testing in progress</h2><div class="cleaning-controls" role="group" aria-label="Cleaning controls"><button class="button" disabled>${icon('lock')}Start cleaning</button><button class="button danger" data-action="stop">${icon('stop')}Simulate stop request</button></div></div></div><div class="split-layout spaced"><article class="panel"><div class="panel-heading"><h2>Cleaning simulation</h2>${pill('Simulation only','blue')}</div><label>Simulated conditions<select id="scenario" ${['queued','running'].includes(state.simStage)?'disabled':''}><option value="clear">All conditions clear</option><option value="cat">Cat detected</option><option value="unknown">Vision unknown / expired</option><option value="sensor">Sensor unavailable</option><option value="offline">Communication lost</option></select></label><div class="simulation-track">${stages.map((stage,index)=>`<div class="simulation-step ${active!==undefined&&index<=active?'active':''}"><span>${active!==undefined&&index<active?icon('check'):index+1}</span>${stage}</div>`).join('')}</div><p class="simulation-state" role="status">${simText}</p><div class="action-row"><button class="button secondary" data-action="simulate" ${['queued','running'].includes(state.simStage)?'disabled':''}>${icon('clean')}Run simulation</button><button class="text-link" data-action="hazard" ${['queued','running'].includes(state.simStage)?'':'disabled'}>Simulate interruption</button></div></article><article class="panel"><h2>Hardware checks required</h2><div class="checklist"><div>${icon('clock')}Home / end position feedback</div><div>${icon('clock')}Return-to-home behavior</div><div>${icon('clock')}Jam detection and stopping</div><div>${icon('clock')}Physical stop mechanism</div><div>${icon('clock')}Assembled hardware validation</div></div><div class="callout amber">${icon('info')}<p>Confirm the motor has stopped on the device.</p></div></article></div><article class="panel spaced"><div class="panel-heading"><h2>Control activity</h2>${pill('Preview session')}</div>${state.commands.length?state.commands.map(command=>`<div class="command-row">${icon(command.action==='stop'?'stop':'clean')}<div><strong>${escapeHtml(command.title)}</strong><small>${escapeHtml(command.reason)} · ${escapeHtml(command.time)}</small></div>${pill(command.status,command.status==='Rejected'?'red':'neutral')}</div>`).join(''):empty('No control activity','Run a simulation to see it here.')}</article>`;
+  return `${heading('Cleaning')}<article id="usb-motor-panel" class="panel" hidden>
+    <h2>USB motor</h2><p id="usb-status" role="status"></p>
+    <div class="action-row"><button class="button" data-action="usb-run" disabled>Run one cycle</button>
+    <button class="button danger" data-action="usb-stop">Stop motor</button></div>
+  </article><p id="usb-hint" class="fine">USB controls are available when the local controller is configured.</p><div class="split-layout spaced"><article class="panel"><div class="panel-heading"><h2>Cleaning simulation</h2>${pill('Simulation only','blue')}</div><label>Simulated conditions<select id="scenario" ${['queued','running'].includes(state.simStage)?'disabled':''}><option value="clear">All conditions clear</option><option value="cat">Cat detected</option><option value="unknown">Vision unknown / expired</option><option value="sensor">Sensor unavailable</option><option value="offline">Communication lost</option></select></label><div class="simulation-track">${stages.map((stage,index)=>`<div class="simulation-step ${active!==undefined&&index<=active?'active':''}"><span>${active!==undefined&&index<active?icon('check'):index+1}</span>${stage}</div>`).join('')}</div><p class="simulation-state" role="status">${simText}</p><div class="action-row"><button class="button secondary" data-action="simulate" ${['queued','running'].includes(state.simStage)?'disabled':''}>${icon('clean')}Run simulation</button><button class="text-link" data-action="hazard" ${['queued','running'].includes(state.simStage)?'':'disabled'}>Simulate interruption</button></div></article><article class="panel"><h2>Hardware checks required</h2><div class="checklist"><div>${icon('clock')}Home / end position feedback</div><div>${icon('clock')}Return-to-home behavior</div><div>${icon('clock')}Jam detection and stopping</div><div>${icon('clock')}Physical stop mechanism</div><div>${icon('clock')}Assembled hardware validation</div></div><div class="callout amber">${icon('info')}<p>Confirm the motor has stopped on the device.</p></div></article></div><article class="panel spaced"><div class="panel-heading"><h2>Control activity</h2>${pill('Preview session')}</div>${state.commands.length?state.commands.map(command=>`<div class="command-row">${icon(command.action==='stop'?'stop':'clean')}<div><strong>${escapeHtml(command.title)}</strong><small>${escapeHtml(command.reason)} · ${escapeHtml(command.time)}</small></div>${pill(command.status,command.status==='Rejected'?'red':'neutral')}</div>`).join(''):empty('No control activity','Run a simulation to see it here.')}</article>`;
 }
 function notifications() {
-  const records=[{type:'observation',icon:'clean',title:'A photo is ready for a closer look',text:'Sample observation: no visible stool. Review the image and assign it to a cat.',time:'10:42 AM · Sample',href:'#detail/sample-1',unread:true},{type:'system',icon:'wifi',title:'Camera connection needs attention',text:'Example device notice. This preview is not connected to your camera.',time:'10:30 AM · Sample',unread:true},{type:'system',icon:'shield',title:'Real cleaning is locked',text:'Physical motor controls stay unavailable while the mechanism is being validated.',time:'9:00 AM · Sample'}].filter(record=>state.notificationFilter==='all'||record.type===state.notificationFilter);
-  return `${heading('Notifications','',`<button class="button secondary" data-action="mark-read">${icon('check')}${state.read?'All read':'Mark all as read'}</button>`)}<article class="panel"><div class="segmented" aria-label="Notification filter">${[['all','All'],['observation','Observations'],['system','Devices']].map(([value,label])=>`<button data-notification-filter="${value}" aria-pressed="${state.notificationFilter===value}">${label}</button>`).join('')}</div>${records.map(record=>`<div class="notification-row ${!state.read&&record.unread?'unread':''}"><span class="notification-icon">${icon(record.icon)}</span><div><h3>${record.title}</h3><p>${record.text}</p><time>${record.time}</time>${record.href?`<br>${arrowLink('View observation',record.href)}`:''}</div></div>`).join('')}</article>`;
+  const records = visionVisits.filter(event=>event.wasteDetected).slice(0,10);
+  return `${heading('Notifications')}<article class="panel">${records.length
+    ? records.map(record=>`<div class="notification-row"><span class="notification-icon">${icon('clean')}</span>
+      <div><h3>Waste detected</h3><p>${escapeHtml(catName(record.catId))}</p><time>${record.date} · ${record.time} MYT</time><br>
+      ${arrowLink('Open full record','#detail/' + record.id)}</div></div>`).join('')
+    : empty('No notifications','Waste detections will appear here.')}</article>`;
 }
 function validCameraIp(value) {
   if (/^(?=.{1,63}\.local$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.local$/i.test(value.trim())) return true;
@@ -377,7 +457,12 @@ function syncCameraFields(form) {
 }
 function settings() {
   const config=state.settings;
-  return `${heading('Settings')}<div class="settings-layout"><form id="settings-form" class="panel"><section class="settings-section"><h2>Device connections</h2><div class="form-stack">${cameraConnectionFields(config)}<label>Arduino port<input name="port" value="${escapeHtml(config.port)}" maxlength="20" placeholder="COM3"></label></div><label class="setting-toggle"><span>Automatic visit observation</span><input name="monitor" type="checkbox" ${config.monitor?'checked':''}></label></section><section class="settings-section"><h3>Photo observations</h3><label class="setting-toggle"><span>Cloud AI analysis<small>Sends photos to the AI service when connected.</small></span><input name="cloud" type="checkbox" ${config.cloud?'checked':''}></label><div class="key-status">${icon('lock')}API key not configured</div><label class="spaced">Visual model<input value="${escapeHtml(config.model)}" disabled></label></section><section class="settings-section"><h3>Notifications</h3><label class="setting-toggle"><span>In-app notifications</span><input name="notifications" type="checkbox" ${config.notifications?'checked':''}></label></section><div class="action-row"><button class="button" type="submit">Save preview settings</button><button class="text-link" type="button" data-action="reset-settings">Reset</button></div><p class="fine spaced no-margin">Camera address is saved in this browser. Other settings apply to this tab.</p></form><div class="stack"><article class="panel"><h2>Account</h2><div class="cat-chip"><span class="owner-avatar">Y</span><span><strong>Cat parent</strong><small>Single-owner account</small></span></div><button class="button secondary" data-action="account-info">Account settings</button></article><article class="panel"><h2>Remote access</h2><div class="key-status">${icon('shield')}Not configured</div></article><article class="panel"><h2>About this preview</h2><p class="fine">Sample records only</p><button class="text-link" data-action="reset-demo">Reset demo session ${icon('arrow')}</button></article></div></div>`;
+  return `${heading('Settings')}<div class="settings-layout"><form id="settings-form" class="panel">
+    <section class="settings-section"><h2>Live camera</h2><div class="form-stack">${cameraConnectionFields(config)}</div></section>
+    <div class="action-row"><button class="button" type="submit">Save camera settings</button><button class="text-link" type="button" data-action="reset-settings">Reset</button></div>
+    <p class="fine spaced no-margin">Live camera settings are saved in this browser.</p></form>
+    <article class="panel"><h2>Automatic monitoring</h2><p class="fine">Set the camera IP, USB port and cleaning mode when starting PawLog on the controller PC.</p></article></div>`;
+
 }
 function currentRoute() {
   const parts=location.hash.slice(1).split('/');
@@ -387,6 +472,9 @@ function render(moveFocus=false) {
   const route=currentRoute();
   const views={overview,camera,history,cleaning,cats,notifications,settings,detail:()=>detail(route.id)};
   $('#main').innerHTML=views[route.page]();
+  const count = $('#workspace-cat-count');
+  if (count) count.textContent = state.cats.length + (state.cats.length === 1 ? ' cat' : ' cats');
+  updateDevice();
   if (route.page === 'camera' && state.cameraStream) $('#camera-stream').append(state.cameraStream.image);
   document.title=`PawLog · ${names[route.page]}`;
   $('#breadcrumb-page').textContent=names[route.page];
@@ -394,10 +482,6 @@ function render(moveFocus=false) {
   $$('[data-nav]').forEach(link=>{if(link.dataset.nav===navPage)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});
   const more=$('#more-button');
   if(['cleaning','notifications','settings'].includes(route.page))more.setAttribute('aria-current','page');else more.removeAttribute('aria-current');
-  $$('.notification-count').forEach(element=>{element.textContent=state.read?'0':'2';element.hidden=state.read;});
-  $('.notification-dot').hidden=state.read;
-  $('.notification-link').setAttribute('aria-label',`Notifications, ${state.read?'0':'2'} unread`);
-  $('.workspace small').textContent=`${state.cats.length} cats`;
   if(route.page==='history')$('#history-filter').elements.cat.value=state.filters.cat;
   if(moveFocus){$('#main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
 }
@@ -425,6 +509,15 @@ document.addEventListener('click',event=>{
   const button=event.target.closest('[data-action]');
   if(button&&!button.disabled){
     const action=button.dataset.action;
+    if (action === 'toggle-health-details') {
+      const details = $('#health-rating-details');
+      const expanded = details.hidden;
+      details.hidden = !expanded;
+      button.setAttribute('aria-expanded', String(expanded));
+      button.textContent = expanded ? 'Read less' : 'Read more';
+      return;
+    }
+    if (action === 'usb-run' || action === 'usb-stop') { requestMotor(action.slice(4)); return; }
     if(action==='automatic-camera-urls'){
       const form=$('#settings-form');
       for(const name of ['streamOverride']){form.elements[name].value='';form.elements[name].setCustomValidity('');}
@@ -467,12 +560,7 @@ document.addEventListener('click',event=>{
       refreshHistory();
       search.focus();
     }
-    if(action==='cycle-box'){
-      const box=state.boxes.find(item=>String(item.id)===button.dataset.id);
-      box.status=(box.status+1)%boxStatuses.length;
-      $('#box-overview').innerHTML=boxOverview();
-      $(`[data-action="cycle-box"][data-id="${box.id}"]`).focus({preventScroll:true});
-    }
+
     if(action==='toggle-stream'){
       if(state.cameraStream){stopCameraStream();render();}
       else startCameraStream();
@@ -485,7 +573,6 @@ document.addEventListener('click',event=>{
       state.analysisTimer=setTimeout(()=>{item.status='Review image';if(currentRoute().page==='detail')render();toast('Sample observation displayed. No cloud AI request was made.');},1200);
     }
     if(action==='finish-analysis'){const item=state.events.find(record=>record.id===button.dataset.id);item.status='Review image';render();}
-    if(action==='mark-read'){state.read=true;render();toast('All sample notifications marked as read.');}
     if(action==='stop'||action==='hazard'){
       finishSimulation('stopped');
       addCommand(action==='hazard'?'Sample interruption':'Stop button preview','No device connected; physical motor state unknown','Not sent','stop');
@@ -504,11 +591,10 @@ document.addEventListener('click',event=>{
     if(action==='reset-settings'){
       state.settings=defaultSettings();
       state.cameraError='';
-      const saved=saveCameraIp(defaultCameraIp);
+      const saved=saveCameraIp(defaultCameraIp, '');
       render();
-      toast(saved?'Preview settings reset.':'Settings reset for this tab. Browser storage is unavailable.');
+      toast(saved?'Camera settings reset.':'Settings reset for this tab. Browser storage is unavailable.');
     }
-    if(action==='reset-demo')location.reload();
   }
   const historyRow=event.target.closest('[data-history-row]');
   if(historyRow) {
@@ -521,7 +607,6 @@ document.addEventListener('click',event=>{
     });
     $('#history-selected').innerHTML = historyRecordDetails(selected);
   }
-  const filter=event.target.closest('[data-notification-filter]');if(filter){state.notificationFilter=filter.dataset.notificationFilter;render();}
   if(event.target.closest('#more-button'))$('#more-dialog').showModal();
   if(event.target.closest('#more-dialog a'))$('#more-dialog').close();
 });
@@ -544,6 +629,12 @@ document.addEventListener('input', event => {
   refreshHistory();
 });
 document.addEventListener('change',event=>{
+  if (event.target.form?.id === 'visit-assignment' && event.target.name === 'cat') {
+    const field = event.target.form.elements.catName;
+    field.required = event.target.value === 'new';
+    field.closest('label').hidden = !field.required;
+    if (field.required) field.focus();
+  }
   if(event.target.form?.id==='history-filter' && ['date','cat'].includes(event.target.name)){
     state.filters[event.target.name]=event.target.value;
     refreshHistory();
@@ -554,6 +645,29 @@ document.addEventListener('submit',async event=>{
   const form=event.target;
   const formId=form.getAttribute('id');
   if(formId==='history-filter') return;
+  if (formId === 'visit-assignment') {
+    const record = visionVisits.find(item=>item.id===form.dataset.id);
+    if (!record) return;
+    let catId = form.elements.cat.value;
+    let cats = state.cats;
+    if (catId === 'new') {
+      const name = form.elements.catName.value.trim();
+      if (!name) { toast('Enter a cat name.'); return; }
+      catId = crypto.randomUUID();
+      cats = [...cats,{id:catId,name,age:'',breed:'',photo:''}];
+    }
+    try {
+      saveIdentity(cats,{...assignments,[record.id]:catId});
+    } catch {
+      toast('Browser storage is unavailable. Assignment could not be saved.');
+      return;
+    }
+    record.catId = catId;
+    render();
+    $('#visit-assignment select').focus();
+    toast('Cat assignment saved.');
+    return;
+  }
   if(formId==='assign-form'){
     const record=state.events.find(item=>item.id===form.dataset.id);
     record.catId=form.elements.cat.value;render();toast('Sample assignment updated for this tab.');
@@ -571,23 +685,40 @@ document.addEventListener('submit',async event=>{
         if(!valid){$('#settings-form details').open=true;field.setCustomValidity('Enter a live stream URL, such as http://pawlog-cam.local:81/stream.');field.reportValidity();return;}
       }
     }
-    state.settings={...state.settings,cameraIp:form.elements.cameraIp.value.trim(),streamOverride:form.elements.streamOverride.value.trim(),port:form.elements.port.value,monitor:form.elements.monitor.checked,cloud:form.elements.cloud.checked,notifications:form.elements.notifications.checked};
+    state.settings={...state.settings,cameraIp:form.elements.cameraIp.value.trim(),streamOverride:form.elements.streamOverride.value.trim()};
     state.cameraError='';
-    const saved=saveCameraIp(state.settings.cameraIp);
-    toast(saved?'Camera address saved in this browser.':'Settings applied for this tab. Browser storage is unavailable.');
+    const saved=saveCameraIp(state.settings.cameraIp,state.settings.streamOverride);
+    toast(saved?'Camera settings saved.':'Settings applied for this tab. Browser storage is unavailable.');
   }
   if(formId==='cat-form'){
     const name=form.elements.name.value.trim();if(!name){$('#cat-error').textContent='Please enter a name.';return;}
     const existing=catById(form.elements.id.value);
-    const file=form.elements.photo.files[0];let image=existing?.photo||asset('mochi.jpg');
+    const file=form.elements.photo.files[0];let image=existing?.photo||'';
     if(file){
       if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>5*1024*1024){$('#cat-error').textContent='Choose a JPG, PNG or WebP photo under 5 MB.';return;}
-      const url=URL.createObjectURL(file);
-      try{const check=new Image();check.src=url;await check.decode();image=url;}catch{URL.revokeObjectURL(url);$('#cat-error').textContent='This file could not be opened as a photo.';return;}
+      try {
+        image = await new Promise((resolve,reject)=>{
+          const reader = new FileReader();
+          reader.onload = ()=>resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const check = new Image();
+        check.src = image;
+        await check.decode();
+      } catch {
+        $('#cat-error').textContent='This file could not be opened as a photo.';
+        return;
+      }
     }
-    const cat={id:existing?.id||`cat-${Date.now()}`,name,age:Number(form.elements.age.value),breed:form.elements.breed.value.trim(),photo:image};
-    if(existing){if(existing.photo!==image&&existing.photo.startsWith('blob:'))URL.revokeObjectURL(existing.photo);Object.assign(existing,cat);}else state.cats.push(cat);
-    $('#cat-dialog').close();render();toast('Sample cat profile saved. It will reset on reload.');
+    const cat={id:existing?.id||`cat-${Date.now()}`,name,age:form.elements.age.value === '' ? '' : Number(form.elements.age.value),breed:form.elements.breed.value.trim(),photo:image};
+    try {
+      saveIdentity(existing ? state.cats.map(item=>item.id===cat.id ? cat : item) : [...state.cats,cat],assignments);
+    } catch {
+      $('#cat-error').textContent='Could not save the profile. Try a smaller photo or check browser storage.';
+      return;
+    }
+    $('#cat-dialog').close();render();toast('Cat profile saved.');
   }
 });
 window.addEventListener('hashchange',()=>{
@@ -599,3 +730,7 @@ render();
 
 refreshVisionVisits();
 setInterval(refreshVisionVisits,5000);
+if (localDashboard) {
+  refreshDevice();
+  setInterval(refreshDevice,1500);
+}

@@ -38,7 +38,7 @@ def send(opener, key, url, record, visit_id, expected_status):
         },
     )
     with opener.open(request, timeout=12) as response:
-        if response.status != expected_status or json.load(response).get("id") != visit_id:
+        if response.status not in expected_status or json.load(response).get("id") != visit_id:
             raise ValueError("Unexpected PawLog response")
 
 
@@ -56,14 +56,14 @@ def sync_observation(opener, key, folder):
         try:
             observation = observe_stool(folder / "waste-original.png")
         except (OSError, ValueError):
-            send(opener, key, url, {"status": "failed"}, folder.name, 200)
+            send(opener, key, url, {"status": "failed"}, folder.name, (200,))
             print(f"PawLog AI analysis will retry: {folder.name}", flush=True)
             return
         pending = cached.with_suffix(".tmp")
         pending.write_text(json.dumps(observation), encoding="utf-8")
         pending.replace(cached)
     observation = json.loads(cached.read_text(encoding="utf-8"))
-    send(opener, key, url, {"status": "complete", "observation": observation}, folder.name, 200)
+    send(opener, key, url, {"status": "complete", "observation": observation}, folder.name, (200,))
     marker.touch()
     print(f"PawLog AI observation uploaded: {folder.name}", flush=True)
 
@@ -88,7 +88,7 @@ def sync_visits():
                     "wasteDetected": report["waste_detected"],
                     "images": {name: base64.b64encode((folder / name).read_bytes()).decode("ascii") for name in IMAGES},
                 }
-                send(opener, key, ENDPOINT, record, folder.name, 201)
+                send(opener, key, ENDPOINT, record, folder.name, (200, 201))
                 marker.touch()
                 print(f"PawLog uploaded: {folder.name}", flush=True)
             if report["waste_detected"] is True:

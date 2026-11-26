@@ -4,7 +4,7 @@ This wiring supports both `MotorTest.ino` and `SensorMotorTest.ino` on the Ardui
 
 ## Current integration
 
-Camera monitoring and hosted History run independently of UNO. The motor configuration omits limit switches and uses MotorTest manual timed pulses. Automatic tray motion and occupied-tray protection are unverified.
+For the camera and MotorTest setup, start camera monitoring from the repository root with `.\.venv\Scripts\python.exe -m src.webapp.preview --camera CAMERA_IP` (replace CAMERA_IP with the address after `Camera Ready!`). Use the Uno USB Serial Monitor at 9600 baud for supervised motor tests. The timed sketch does not have occupancy or position feedback.
 
 ## Arduino Uno and HC-SR04 (optional diagnostic)
 
@@ -55,3 +55,29 @@ The Uno 5 V connection is for the current prototype. If the camera shows brownou
 4. Secure the motor and disengage it from the cleaning mechanism before powering it for a bench test.
 
 `SensorMotorTest.ino` uses a manual serial command to simulate the computer's camera status. Automatic cleaning still requires camera status integration and testing on the assembled prototype.
+
+## Timed tray cycle without limit switches
+
+### Camera-triggered cycle
+
+Upload the updated MotorTest sketch, close Arduino IDE Serial Monitor, and
+start PawLog from the project root. Replace COM_PORT with the Uno USB port.
+Check that the tray is level before starting and supervise the prototype.
+
+```powershell
+.\.venv\Scripts\python.exe -m src.webapp.preview --camera pawlog-cam.local --motor-test COM_PORT
+```
+
+A confirmed visit (six seconds of continuous cat detections) followed by
+ten seconds without a cat detection and fresh confirming frames requests
+one timed cycle. The waste result is saved separately. Camera loss during
+movement expires the Uno watchdog, and a returning detection cancels the
+cycle. After an interrupted cycle, inspect and level the tray, reset the Uno,
+and restart PawLog. Camera-only clearance is an estimate based on visible
+frames. Tray return is timed. Keep the motor cutoff within reach.
+
+### Serial Monitor test
+
+Upload diagnostics/MotorTest/MotorTest.ino to UNO and use Serial Monitor at 9600 baud. With the tray initially level, send r for a timed forward-pause-return cycle, or x to stop and cancel the remaining cycle. Repeated run requests while moving are ignored. After stopping, allow one second before a new command.
+
+The current sketch uses PWM 255, forward 1000 ms, pause 1000 ms, and return 200 ms. Tune FORWARD_MS and RETURN_MS independently with the actual mechanism. Set FORWARD_USES_RPWM to false if the first movement is reversed. The driver is disabled during the pause, so verify the tray cannot fall or back-drive. Program timing cannot confirm an angle or home position. After an interrupted cycle or power loss, manually check tray position before starting again. Use supervised tests with no animals near the mechanism.

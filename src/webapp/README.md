@@ -1,6 +1,6 @@
-# PawLog UI preview
+# PawLog dashboard
 
-English, cat-themed frontend based on the approved Canva concept. The local History page shows completed camera visits saved by the monitoring script. Other demo screens retain their sample data.
+Overview, History, My Cats and Notifications use completed camera visits. Open a full record to assign a cat below the visit photo. Cat profiles and assignments are saved in the browser for the current site address.
 
 ## Open locally
 
@@ -14,15 +14,19 @@ Open **http://127.0.0.1:8080** on this computer. Keep the server running while v
 
 The preview server listens on loopback so real photos stay on this computer.
 
-## Automatic camera history
+## Camera, USB motor and automatic cleaning
 
-Leave the PawLog preview running. In another PowerShell window at the project root, start the monitor once:
+For wiring, hardware startup, and photo-only tests, see the [PawLog controller guide](../firmware/controller/PawLogController/README.md).
+
+To run the dashboard and camera monitor together without connecting a motor, replace `CAMERA_IP` with the address printed by the ESP32-CAM:
 
 ```powershell
-.\.venv\Scripts\python.exe src/vision/monitor_camera.py "http://pawlog-cam.local/capture"
+.\.venv\Scripts\python.exe -m src.webapp.preview --camera CAMERA_IP
 ```
 
-Open `http://127.0.0.1:8080/#history`. The monitor saves each completed visit under `outputs/vision/auto-*/`. History checks for completed visits every five seconds and displays the cat photo, post-visit photo and annotated detection. The hosted [PawLog History](https://pawlog-workshop-demo.shangkeytchong.chatgpt.site/#history) also receives completed visits when the monitor runs on the PC configured with the PawLog upload credential. Hosted History, visit photos and AI observations are publicly viewable. The upload credential is required to write records. The monitor retries pending visits every 15 seconds. After a positive waste detection, Groq receives only the post-visit photo and the monitor uploads its structured observation to the same History record. If analysis fails, the photos remain available and the monitor retries analysis after five minutes. Previously saved visits can be synced with `python src/vision/upload_pawlog.py --once`.
+Open `http://127.0.0.1:8080/#history`. The monitor saves each completed visit under `outputs/vision/auto-*/`. History checks for completed visits every five seconds. Use the same camera address under **Settings → Live camera** if you want to view its stream.
+
+Camera monitoring uploads completed visits by default using the existing PawLog upload credential. Use `--no-sync` for a local-only session. Hosted [PawLog History](https://pawlog-workshop-demo.shangkeytchong.chatgpt.site/#history), photos and AI observations are publicly viewable. The monitor retries pending uploads every 15 seconds and sends a positive waste photo to Groq for an observation. Previously saved visits can also be synced with `python src/vision/upload_pawlog.py --once`.
 
 ## Files and assets
 
@@ -30,4 +34,4 @@ Open `http://127.0.0.1:8080/#history`. The monitor saves each completed visit un
 
 The litter-box scene is an AI-generated illustrative asset, labeled on every full-size display. Cat portraits are copied from the project's existing local sample photos; they are fictional profiles, not verified cat identities. Assets are local so there are no third-party image requests.
 
-Earlier backend scaffold files (`app.py`, `runtime.py`, `store.py`, `analysis.py`, `vision.py`) are **paused, unfinished integration work** from before the UI-only scope was selected. They are not used or validated by this preview. Do not run them as a production service. The active monitor and hosted Worker provide camera-visit ingestion, Groq observations and online History. Arduino integration remains unfinished.
+Use `preview.py` as the dashboard entry point. With hardware arguments it uses `vision.py` for bounded LAN snapshots, `monitor_camera.py` for visit detection and `cleaning.py` for USB control. The earlier `app.py` server scaffold is a separate entry point.

@@ -83,7 +83,8 @@ def observe_stool(photo: Path) -> dict[str, str]:
         'response_format': {'type': 'json_object'},
         'messages': [
             {'role': 'system', 'content': (
-                'Observe one post-visit cat litter-box photo. Return only a JSON object with English strings '
+                'Observe one post-visit cat litter-box photo. Write short, plain English using everyday words, '
+                'such as poop, soft, watery, or hard. Avoid medical terms. Return only a JSON object with English strings '
                 'color, shape, visible_details, and limitations, each at most 150 characters, plus '
                 'appearance (typical, atypical, unclear), finding (none, loose, hard, unusual_color), '
                 'and blood (none, possible_red, possible_tarry). Typical requires clearly visible brown formed '

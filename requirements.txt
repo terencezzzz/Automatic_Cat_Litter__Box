@@ -1,1 +1,2 @@
 ultralytics==8.4.183
+pyserial==3.5

@@ -57,13 +57,13 @@ class Visit:
         return captured_at - self.clear_since >= CLEAR_TIME
 
 
-def check_camera(source, model):
+def check_camera(source, model, confidence=0.35, fetch=None):
     # Timestamp before requesting the frame, so slow requests cannot make old
     # observations count as an uninterrupted clear window.
     captured_at = monotonic()
     photo_time = datetime.now().astimezone()
-    photo = read_photo(source)
-    _, cats = predict_cat(model, photo, 0.35)
+    photo = fetch(source) if fetch else read_photo(source)
+    _, cats = predict_cat(model, photo, confidence)
     if monotonic() - captured_at > MAX_FRAME_GAP:
         raise RuntimeError("Camera observation took too long")
     return captured_at, photo_time, photo, len(cats)
@@ -104,6 +104,7 @@ def save_waste_check(model, photo, photo_time, visit):
     pending_report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     pending_report.replace(output / "result.json")
     print(f"Waste detected: {report['waste_detected']} | Saved: {output}", flush=True)
+    return report['waste_detected']
 
 
 def sync_pawlog_in_background():
@@ -118,27 +119,53 @@ def sync_pawlog_in_background():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", help="ESP32-CAM IP or full HTTP /capture URL")
-    source = parser.parse_args().source.strip()
+    parser.add_argument("--cat-conf", type=float, default=0.35,
+                        help="Cat confidence threshold (default: 0.35)")
+    args = parser.parse_args()
+    if not 0 < args.cat_conf < 1:
+        parser.error("--cat-conf must be between 0 and 1")
+    source = args.source.strip()
     if not source.startswith(("http://", "https://")):
         source = "http://" + source
     source = source.rstrip("/")
     if not source.endswith("/capture"):
         source += "/capture"
 
+    monitor(source, args.cat_conf, sync=True)
+
+
+def monitor(source, confidence=.35, *, cleaning=None, automatic=False, timed_motor=None, stop=None, sync=False, fetch=None):
     print(f"Loading models. Camera: {source}", flush=True)
     cat_model = YOLO(str(ROOT / "models" / "yolo26n.pt"))
     waste_model = YOLO(str(ROOT / "models" / "weights.pt"))
-    if PAWLOG_KEY.is_file():
+    if sync:
+        if not PAWLOG_KEY.is_file():
+            print('PawLog upload key missing. Visits are saved locally and upload will retry.', flush=True)
         Thread(target=sync_pawlog_in_background, daemon=True).start()
     visit = Visit()
     confirm_next_frame = False
-    print("Monitoring. Press Ctrl+C to stop.", flush=True)
+    print(f"Monitoring. Cat threshold: {confidence:.2f}. Press Ctrl+C to stop.", flush=True)
 
-    while True:
+    pending_clean = None
+    while stop is None or not stop.is_set():
         started = monotonic()
         try:
-            captured_at, photo_time, photo, cat_count = check_camera(source, cat_model)
+            captured_at, photo_time, photo, cat_count = check_camera(source, cat_model, confidence, fetch)
+            if stop is not None and stop.is_set():
+                return
             cat_present = cat_count > 0
+            if timed_motor:
+                timed_motor.observe(cat_present, captured_at)
+                if pending_clean is not None:
+                    if not cat_present and captured_at - pending_clean <= 2.5:
+                        print('MotorTest start requested' if timed_motor.start(captured_at) else 'MotorTest start blocked', flush=True)
+                    pending_clean = None
+            if cleaning:
+                cleaning.observe(cat_present, captured_at)
+                if pending_clean is not None:
+                    if not cat_present and captured_at - pending_clean <= MAX_FRAME_GAP:
+                        print('Automatic start queued' if cleaning.run_once() else 'Automatic start blocked', flush=True)
+                    pending_clean = None
             ready = visit.observe(cat_present, captured_at)
             if cat_present:
                 visit.record_cat(photo, photo_time, cat_count)
@@ -148,7 +175,16 @@ def main():
             elif not visit.seen_cat:
                 print("Waiting for a cat visit", flush=True)
             elif ready and confirm_next_frame:
-                save_waste_check(waste_model, photo, photo_time, visit)
+                if timed_motor:
+                    try:
+                        save_waste_check(waste_model, photo, photo_time, visit)
+                    except Exception as error:
+                        print(f"Waste check failed: {error}", flush=True)
+                    pending_clean = captured_at
+                else:
+                    waste = save_waste_check(waste_model, photo, photo_time, visit)
+                    if automatic and waste:
+                        pending_clean = captured_at
                 visit = Visit()
                 ready = False
             elif ready:
@@ -157,10 +193,21 @@ def main():
                 print(f"Cat not detected | Clear window: {captured_at - visit.clear_since:.1f}s", flush=True)
             confirm_next_frame = ready
         except Exception as error:
+            if timed_motor and timed_motor.running:
+                timed_motor.blocked = True
+                try:
+                    timed_motor.stop()
+                except OSError:
+                    pass  # The Uno camera watchdog also stops the timed cycle.
+            if cleaning:
+                cleaning.observe(None, started)
+            pending_clean = None
             visit.observe(None, monotonic())
             confirm_next_frame = False
             print(f"UNKNOWN | Clear timer reset: {error}", flush=True)
-        sleep(max(0.0, INTERVAL - (monotonic() - started)))
+        interval = .25 if timed_motor and timed_motor.running else INTERVAL
+        delay = max(0.0, interval - (monotonic() - started))
+        stop.wait(delay) if stop is not None else sleep(delay)
 
 
 if __name__ == "__main__":

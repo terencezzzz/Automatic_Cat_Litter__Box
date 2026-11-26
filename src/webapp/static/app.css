@@ -168,3 +168,7 @@ dialog { width: min(500px,calc(100% - 32px)); max-height: calc(100dvh - 40px); o
 }
 
 .live-camera-frame { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: var(--canvas); border-radius: 8px; }
+.health-rating { display: flex; flex-direction: column; gap: 0; }
+.health-rating .detail-observations { margin: 8px 0 0; }
+.health-rating .detail-observations dt, .health-rating .text-link { color: inherit; }
+.health-rating .text-link { align-self: flex-end; min-height: 44px; }

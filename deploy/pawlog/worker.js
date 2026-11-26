@@ -30,7 +30,10 @@ async function upload(request, env) {
   }
   const {id,capturedAt,wasteDetected} = record;
   const storedImages = Object.fromEntries(Object.keys(images).map(name => [name,record.images[name]]));
-  await env.BUCKET.put(keyFor(id),JSON.stringify(storedImages),{customMetadata:{id,capturedAt,wasteDetected:String(wasteDetected)}});
+  const stored = await env.BUCKET.put(keyFor(id),JSON.stringify(storedImages),{
+    onlyIf:{etagDoesNotMatch:'*'},customMetadata:{id,capturedAt,wasteDetected:String(wasteDetected)}
+  });
+  if (!stored) return json({id},200);
   return json({id},201);
 }
 
