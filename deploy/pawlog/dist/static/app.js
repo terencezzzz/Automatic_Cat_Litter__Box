@@ -403,7 +403,7 @@ function detail(identifier) {
     ];
     return `${arrowLink('Back to History','#history')}${heading('Camera visit',`${event.date} · ${event.time} MYT`)}
       ${event.status ? `<p>${pill(event.status)}</p>` : ''}<div class="split-layout">${images.map(([label,file])=>`
-        <article class="panel"><h2>${label}</h2><div class="snapshot"><img src="${visitImage(event,file)}" alt="${label}"></div>${file === 'cat.jpg' ? visitAssignment(event) : ''}${file === 'detection.jpg' && event.wasteDetected === false ? '<p class="fine spaced no-margin">No poop detected</p>' : ''}</article>
+        <article class="panel"><h2>${label}</h2><div class="snapshot full-frame"><img src="${visitImage(event,file)}" alt="${label}"></div>${file === 'cat.jpg' ? visitAssignment(event) : ''}${file === 'detection.jpg' && event.wasteDetected === false ? '<p class="fine spaced no-margin">No poop detected</p>' : ''}</article>
       `).join('')}</div>${aiObservation(event)}
       <p class="detail-disclaimer spaced">AI can make mistakes. If you’re concerned about your cat’s health, consult a licensed veterinarian.</p>`;
   }

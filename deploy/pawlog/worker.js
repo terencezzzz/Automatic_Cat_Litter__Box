@@ -101,6 +101,20 @@ async function listVisits(env) {
 export default {
   async fetch(request,env) {
     const path = new URL(request.url).pathname;
+    const recordPath = path.match(/^\/api\/vision-visits\/(auto-\d{8}-\d{6}-\d{6})$/);
+    if (recordPath) {
+      if (request.method !== 'DELETE') return json({error:'Method not allowed'},405);
+      if (!authorizedUpload(request,env)) return json({error:'Unauthorized'},401);
+      const id = recordPath[1];
+      const key = keyFor(id);
+      const record = await env.BUCKET.head(key);
+      if (!record) return json({error:'Visit not found'},404);
+      if (record.customMetadata?.wasteDetected !== 'false') {
+        return json({error:'Only negative detection records can be deleted'},409);
+      }
+      await env.BUCKET.delete([key,key+'/observation']);
+      return json({id,deleted:true});
+    }
     const observationPath = path.match(/^\/api\/vision-visits\/(auto-\d{8}-\d{6}-\d{6})\/observation$/);
     if (observationPath) {
       if (request.method !== 'POST') return json({error:'Method not allowed'},405);
